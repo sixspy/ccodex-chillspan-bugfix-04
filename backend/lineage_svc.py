@@ -15,13 +15,26 @@ def list_edges(authorization: AuthHeader = None):
     require_user(authorization)
     with connect() as conn:
         rows = conn.execute(
-            """SELECT e.*, a.batch_code from_code, b.batch_code to_code
+            """SELECT e.*, a.batch_code from_code, b.batch_code to_code,
+                      json_array_length(COALESCE(a.temp_points,'[]')) AS from_bound_point_count,
+                      (SELECT COALESCE(MAX(s.point_count),0) FROM spectrum_exports s
+                        WHERE s.batch_id=e.from_batch_id AND s.status='已导出') AS from_landed_point_count,
+                      (SELECT COUNT(*) FROM spectrum_exports s
+                        WHERE s.batch_id=e.from_batch_id AND s.status='已导出') AS from_official_exports
                FROM lineage_edges e
                JOIN temp_batches a ON a.id=e.from_batch_id
                LEFT JOIN temp_batches b ON b.id=e.to_batch_id
                ORDER BY e.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["from_row_gate_ok"] = (
+                d["from_official_exports"] >= 1
+                and d["from_landed_point_count"] == d["from_bound_point_count"]
+            )
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/lineage")

@@ -32,7 +32,11 @@ def list_batches(authorization: AuthHeader = None, status: str | None = None):
     with connect() as conn:
         if status:
             rows = conn.execute(
-                """SELECT b.*, c.chamber_code, p.probe_code FROM temp_batches b
+                """SELECT b.*, c.chamber_code, p.probe_code,
+                          json_array_length(COALESCE(b.temp_points,'[]')) AS bound_point_count,
+                          (SELECT COALESCE(MAX(s.point_count),0) FROM spectrum_exports s
+                            WHERE s.batch_id=b.id AND s.status='已导出') AS landed_point_count
+                   FROM temp_batches b
                    JOIN cold_chambers c ON c.id=b.chamber_id
                    JOIN probes p ON p.id=b.probe_id
                    WHERE b.status=? ORDER BY b.id DESC""",
@@ -40,7 +44,11 @@ def list_batches(authorization: AuthHeader = None, status: str | None = None):
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT b.*, c.chamber_code, p.probe_code FROM temp_batches b
+                """SELECT b.*, c.chamber_code, p.probe_code,
+                          json_array_length(COALESCE(b.temp_points,'[]')) AS bound_point_count,
+                          (SELECT COALESCE(MAX(s.point_count),0) FROM spectrum_exports s
+                            WHERE s.batch_id=b.id AND s.status='已导出') AS landed_point_count
+                   FROM temp_batches b
                    JOIN cold_chambers c ON c.id=b.chamber_id
                    JOIN probes p ON p.id=b.probe_id
                    ORDER BY b.id DESC"""
@@ -49,6 +57,11 @@ def list_batches(authorization: AuthHeader = None, status: str | None = None):
         for r in rows:
             d = dict(r)
             d["temp_points"] = json.loads(d["temp_points"] or "[]")
+            d["row_gate_ok"] = (
+                d["status"] == "已封批"
+                and d["landed_point_count"] == d["bound_point_count"]
+                and d["bound_point_count"] > 0
+            )
             items.append(d)
         return {"items": items}
 
@@ -68,6 +81,7 @@ def get_batch(batch_id: int, authorization: AuthHeader = None):
             raise HTTPException(404, "批次不存在")
         data = dict(row)
         data["temp_points"] = json.loads(data["temp_points"] or "[]")
+        data["bound_point_count"] = len(data["temp_points"])
         exc = conn.execute(
             "SELECT * FROM excursion_cursors WHERE batch_id=? ORDER BY id DESC",
             (batch_id,),
@@ -76,6 +90,17 @@ def get_batch(batch_id: int, authorization: AuthHeader = None):
             "SELECT * FROM seal_snapshots WHERE batch_id=? ORDER BY id DESC",
             (batch_id,),
         ).fetchall()
+        landed = conn.execute(
+            """SELECT COALESCE(MAX(point_count),0) n FROM spectrum_exports
+               WHERE batch_id=? AND status='已导出'""",
+            (batch_id,),
+        ).fetchone()["n"]
+        data["landed_point_count"] = landed
+        data["row_gate_ok"] = (
+            data["status"] == "已封批"
+            and landed == data["bound_point_count"]
+            and data["bound_point_count"] > 0
+        )
         return {
             "batch": data,
             "excursions": [dict(e) for e in exc],

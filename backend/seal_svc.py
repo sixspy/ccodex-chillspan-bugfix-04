@@ -19,10 +19,19 @@ def list_seals(authorization: AuthHeader = None):
     require_user(authorization)
     with connect() as conn:
         rows = conn.execute(
-            """SELECT s.*, b.batch_code FROM seal_snapshots s
+            """SELECT s.*, b.batch_code,
+                      json_array_length(COALESCE(b.temp_points,'[]')) AS bound_point_count,
+                      (SELECT COALESCE(MAX(sp.point_count),0) FROM spectrum_exports sp
+                        WHERE sp.batch_id=s.batch_id AND sp.status='已导出') AS landed_point_count
+               FROM seal_snapshots s
                JOIN temp_batches b ON b.id=s.batch_id ORDER BY s.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["row_gate_ok"] = d["landed_point_count"] == d["bound_point_count"] and d["bound_point_count"] > 0
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/seals")
@@ -50,11 +59,14 @@ def seal_batch(body: SealIn, authorization: AuthHeader = None):
             validate_batch_sealable(bdict, open_exc)
             require_calibration_fresh(batch)
             gen = int(batch["generation"])
+            bound_n = len(json.loads(batch["temp_points"] or "[]"))
             manifest = body.manifest or json.dumps(
                 {
                     "batch_code": batch["batch_code"],
                     "generation": gen + 1,
-                    "point_count": len(json.loads(batch["temp_points"] or "[]")),
+                    "point_count": bound_n,
+                    "bound_point_count": bound_n,
+                    "row_gate": "落地行数须与绑定点数逐点相等，否则正式册零行拒收",
                     "min": batch["min_observed"],
                     "max": batch["max_observed"],
                 },
